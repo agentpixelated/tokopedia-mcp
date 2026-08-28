@@ -24,6 +24,7 @@ This implementation makes uncertainty explicit instead of silently choosing one 
 | `inspect_product` | One fetch that separates parent listing metadata from every concrete SKU and runs contradiction analysis |
 | `analyze_listing` | Deterministically re-analyze an inspection snapshot without another network request |
 | `build_shortlist` | Apply hard constraints, SKU-level deduplication, transparent scoring, risk penalties, and retained rejection reasons |
+| `hunt_products` | Bounded end-to-end discovery, listing deduplication, SKU expansion, constraint filtering, and ranking |
 
 All tools are read-only and return both MCP `structuredContent` and a JSON text fallback.
 
@@ -61,8 +62,8 @@ Example Hermes MCP configuration:
 
 ## Recommended hunt flow
 
-1. Call `search_products` for each relevant model/query.
-2. Call `inspect_product` on plausible listings.
+1. For the standard path, call `hunt_products` with relevant model queries and hard criteria.
+2. For manual control, call `search_products` and then `inspect_product` on plausible listings.
 3. Convert each buyable inspected SKU into a `HuntCandidate`, enriching seller transaction/review fields when available.
 4. Call `build_shortlist` with hard budget/spec constraints.
 5. Ask the generated verification questions in Tokopedia chat before checkout.
@@ -89,7 +90,7 @@ CI runs offline verification on Node 20, 22, and 24. Live drift checks run weekl
 
 ## Current limits
 
-- Seller statistics and reviews are not yet folded directly into `inspect_product`; `build_shortlist` accepts normalized evidence for them.
+- Seller statistics and reviews are not yet folded directly into `inspect_product`; `build_shortlist` accepts normalized evidence for them. `hunt_products` therefore reports seller transaction history as unknown rather than mislabeling product sales.
 - Attribute extraction is intentionally conservative. Conflicts are surfaced rather than guessed away.
 - This is an initial evidence-first core, not a one-for-one recreation of every legacy browsing tool.
 
