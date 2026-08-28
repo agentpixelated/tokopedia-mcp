@@ -76,3 +76,46 @@ test('huntProducts deduplicates the same listing returned by multiple queries', 
   });
   assert.equal(inspections, 1);
 });
+
+test('huntProducts bounds concurrent product-page inspections', async () => {
+  let active = 0;
+  let peak = 0;
+  const manyGateway: TokopediaGateway = {
+    ...gateway,
+    async search(input) {
+      const result = await gateway.search(input);
+      return {
+        ...result,
+        items: Array.from({ length: 6 }, (_, index) => ({
+          ...result.items[0],
+          productId: `parent-${index}`,
+          url: `https://www.tokopedia.com/shop/x390-${index}`,
+        })),
+      };
+    },
+    async inspectProduct(url) {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      const result = await gateway.inspectProduct(url);
+      return {
+        ...result,
+        snapshot: {
+          ...result.snapshot,
+          listing: { ...result.snapshot.listing, productId: url },
+        },
+      };
+    },
+  };
+
+  await huntProducts(manyGateway, {
+    queries: ['x390 yoga'],
+    listingsPerQuery: 6,
+    maxListingsToInspect: 6,
+    inspectionConcurrency: 2,
+    criteria: { limit: 5 },
+  });
+
+  assert.equal(peak, 2);
+});

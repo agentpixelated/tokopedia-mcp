@@ -12,27 +12,28 @@ const text = (value: unknown) => ({
 });
 
 const error = (caught: unknown) => ({
-  isError: true,
-  content: [
-    {
-      type: 'text' as const,
-      text: caught instanceof Error ? caught.message : String(caught),
-    },
-  ],
+  content: [{ type: 'text' as const, text: caught instanceof Error ? caught.message : String(caught) }],
+  isError: true as const,
 });
 
-const annotations = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: true,
-};
+const MoneySchema = z.object({
+  currency: z.literal('IDR'),
+  value: z.number(),
+  formatted: z.string(),
+});
+
+const ProvenanceSchema = z.object({
+  source: z.string(),
+  operation: z.string().optional(),
+  retrievedAt: z.string(),
+  freshness: z.literal('live'),
+});
 
 const SearchOutput = z.object({
   query: z.string(),
   items: z.array(z.record(z.string(), z.unknown())),
   page: z.record(z.string(), z.unknown()),
-  provenance: z.record(z.string(), z.unknown()),
+  provenance: ProvenanceSchema,
 });
 
 const InspectionOutput = z.object({
@@ -42,7 +43,7 @@ const InspectionOutput = z.object({
 
 const AnalysisOutput = z.object({
   issues: z.array(z.record(z.string(), z.unknown())),
-  confidence: z.enum(['low', 'medium', 'high']),
+  confidence: z.enum(['high', 'medium', 'low']),
   priceRange: z.record(z.string(), z.unknown()),
   verificationQuestions: z.array(z.string()),
 });
@@ -70,14 +71,14 @@ const SnapshotSchema = z.object({
   description: z.string(),
   specs: z.array(z.record(z.string(), z.unknown())),
   skus: z.array(z.record(z.string(), z.unknown())),
-  provenance: z.record(z.string(), z.unknown()),
+  provenance: ProvenanceSchema,
 });
 
 const CandidateSchema = z.object({
   productId: z.string(),
   skuId: z.string(),
   title: z.string(),
-  url: z.string(),
+  url: z.string().url(),
   price: z.number(),
   rating: z.number(),
   reviewCount: z.number().int().min(0),
@@ -89,15 +90,22 @@ const CandidateSchema = z.object({
   issueSeverities: z.array(z.enum(['low', 'medium', 'high'])),
 });
 
+const annotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+};
+
 export function createServer(gateway: TokopediaGateway = new LiveTokopediaGateway()): McpServer {
-  const server = new McpServer({ name: 'tokopedia-mcp', version: '0.1.0' });
+  const server = new McpServer({ name: 'tokopedia-evidence', version: '0.1.0' });
 
   server.registerTool(
     'search_products',
     {
       title: 'Search Tokopedia products',
       description:
-        'Search Tokopedia and return normalized listing-level discovery data with exact numeric prices, canonical URLs, pagination, and provenance. Search results are parent listings, not verified purchasable SKUs; call inspect_product before ranking a listing.',
+        'Discover Tokopedia parent listings. Returns numeric IDR prices, canonical URLs, pagination, shop identity, and live provenance. Inspect a listing before treating its displayed price as the requested SKU price.',
       inputSchema: {
         query: z.string().min(1),
         page: z.number().int().min(1).default(1),
@@ -202,6 +210,7 @@ export function createServer(gateway: TokopediaGateway = new LiveTokopediaGatewa
         queries: z.array(z.string().min(1)).min(1).max(10),
         listingsPerQuery: z.number().int().min(1).max(30).default(10),
         maxListingsToInspect: z.number().int().min(1).max(50).default(20),
+        inspectionConcurrency: z.number().int().min(1).max(8).default(4),
         criteria: z.object({
           priceMin: z.number().int().min(0).optional(),
           priceMax: z.number().int().min(0).optional(),

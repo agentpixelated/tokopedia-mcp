@@ -5,6 +5,7 @@ export interface HuntProductsInput {
   queries: string[];
   listingsPerQuery?: number;
   maxListingsToInspect?: number;
+  inspectionConcurrency?: number;
   criteria: HuntCriteria;
 }
 
@@ -22,6 +23,28 @@ function skuRamGb(title: string, options: Array<{ axis: string; value: string }>
   const generic = optionText.match(/\b(4|8|12|16|24|32|64)\s*gb\b/i);
   const titleMatch = title.match(/(?:ram|memory)[^\d]{0,12}(4|8|12|16|24|32|64)\s*gb/i);
   return Number(explicit?.[1] ?? generic?.[1] ?? titleMatch?.[1]) || null;
+}
+
+async function inspectBounded(
+  gateway: TokopediaGateway,
+  leads: Array<{ url: string }>,
+  concurrency: number,
+) {
+  const results: PromiseSettledResult<Awaited<ReturnType<TokopediaGateway['inspectProduct']>>>[] = new Array(leads.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < leads.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = { status: 'fulfilled', value: await gateway.inspectProduct(leads[index].url) };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, leads.length) }, () => worker()));
+  return results;
 }
 
 export async function huntProducts(gateway: TokopediaGateway, input: HuntProductsInput) {
@@ -43,7 +66,8 @@ export async function huntProducts(gateway: TokopediaGateway, input: HuntProduct
     for (const listing of discovery.items) unique.set(listing.productId || listing.url, listing);
   }
   const leads = [...unique.values()].slice(0, input.maxListingsToInspect ?? 20);
-  const inspected = await Promise.allSettled(leads.map((lead) => gateway.inspectProduct(lead.url)));
+  const concurrency = Math.max(1, Math.min(input.inspectionConcurrency ?? 4, 8));
+  const inspected = await inspectBounded(gateway, leads, concurrency);
   const candidates: HuntCandidate[] = [];
   const failures: Array<{ url: string; error: string }> = [];
   const verificationQuestions = new Set<string>();
