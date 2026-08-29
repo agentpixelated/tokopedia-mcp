@@ -41,7 +41,11 @@ export function applyOutputBudget(
     throw new Error('maxItems must be a positive integer.');
   }
 
-  const selected = value.items.slice(0, budget.maxItems).map(requiredItem);
+  const selected = value.items.slice(0, budget.maxItems).map((item) => (
+    item !== null && typeof item === 'object' && !Array.isArray(item)
+      ? item as Record<string, unknown>
+      : { value: item }
+  ));
   const envelope: BudgetedEnvelope = {
     items: selected,
     provenance: value.provenance,
@@ -53,6 +57,15 @@ export function applyOutputBudget(
       omittedFields: [],
     },
   };
+
+  if (serializedLength(envelope) <= budget.maxChars) return envelope;
+
+  const compacted = envelope.items.map(requiredItem);
+  if (compacted.some((item, index) => serializedLength(item) < serializedLength(envelope.items[index]))) {
+    envelope.items = compacted;
+    envelope.truncation.truncated = true;
+    envelope.truncation.omittedFields.push('items[*].nonEssentialFields');
+  }
 
   while (serializedLength(envelope) > budget.maxChars && envelope.items.length > 0) {
     envelope.items.pop();

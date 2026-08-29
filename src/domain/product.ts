@@ -262,7 +262,7 @@ function findSkus(
         value: stockValue,
         status: stockValue === null ? 'unknown' : stockValue > 0 ? 'in_stock' : 'out_of_stock',
       },
-      buyable: stockObject?.isBuyable !== false && (stockValue === null || stockValue > 0),
+      buyable: price > 0 && stockObject?.isBuyable !== false && (stockValue === null || stockValue > 0),
       cod: Boolean(child.isCOD),
     });
   }

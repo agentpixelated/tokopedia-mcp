@@ -28,3 +28,17 @@ test('applyOutputBudget is deterministic, bounded, and preserves identity/proven
 test('applyOutputBudget rejects budgets too small for an auditable envelope', () => {
   assert.throws(() => applyOutputBudget(value, { maxChars: 100, maxItems: 8 }), /at least 512/);
 });
+
+test('applyOutputBudget preserves all fields and reports no truncation when the envelope fits', () => {
+  const fitting = {
+    items: [{ productId: '1', title: 'Product', details: { stock: 4, seller: 'Shop' } }],
+    provenance: { source: 'fixture' },
+  };
+
+  const result = applyOutputBudget(fitting, { maxChars: 2_000, maxItems: 10 });
+
+  assert.deepEqual(result.items, fitting.items);
+  assert.deepEqual(result.provenance, fitting.provenance);
+  assert.deepEqual(result.truncation.omittedFields, []);
+  assert.equal(result.truncation.truncated, false);
+});

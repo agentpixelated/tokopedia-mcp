@@ -106,3 +106,22 @@ test('invalid option tuples and duplicate SKU IDs make otherwise usable extracti
     ['option_tuple_mismatch', 'duplicate_sku_id'],
   );
 });
+
+test('SKU evidence without a positive numeric price is never marked buyable', () => {
+  const prefix = '$ROOT_QUERY.pdpMainInfo({"productKey":"sparse-product"})';
+  const snapshot = extractProductSnapshot(documentWith({
+    [`${prefix}.components.0.data.0.variant`]: { isVariant: true },
+    [`${prefix}.components.1.data.0.children.0`]: {
+      productID: 'missing-price',
+      productName: 'Sparse product without price',
+      productURL: 'https://www.tokopedia.com/shop/sparse-product',
+      price: 'not-a-number',
+      stock: { stock: 3, isBuyable: true },
+    },
+  }));
+
+  assert.equal(snapshot.skus[0].price.value, 0);
+  assert.equal(snapshot.skus[0].buyable, false);
+  assert.equal(snapshot.variantTruth.state, 'partial');
+  assert.equal(snapshot.variantTruth.diagnostics[0].code, 'missing_price');
+});
