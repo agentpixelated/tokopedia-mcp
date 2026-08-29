@@ -242,3 +242,39 @@ test('huntProducts preserves non-fatal GraphQL warnings from successful pages', 
   assert.equal(result.sourceWarnings[0].query, 'thinkpad x390');
   assert.equal(result.sourceWarnings[0].page, 1);
 });
+
+test('huntProducts does not promote a variant listing when declared SKU truth is unresolved', async () => {
+  const unresolvedGateway: TokopediaGateway = {
+    ...gateway,
+    async inspectProduct(url) {
+      const result = await gateway.inspectProduct(url);
+      return {
+        ...result,
+        snapshot: {
+          ...result.snapshot,
+          skus: [],
+          variantTruth: {
+            state: 'unknown',
+            declared: true,
+            axesFound: 1,
+            skusFound: 0,
+            diagnostics: [{
+              code: 'missing_reference',
+              path: '$ROOT_QUERY.variant',
+              detail: 'Apollo variant evidence missing.',
+            }],
+          },
+        },
+      };
+    },
+  };
+
+  const result = await huntProducts(unresolvedGateway, {
+    queries: ['thinkpad x390'],
+    criteria: { limit: 5 },
+  });
+
+  assert.equal(result.candidateSkus, 0);
+  assert.equal(result.shortlist.ranked.length, 0);
+  assert.equal(result.sourceWarnings[0].code, 'variant_truth_unresolved');
+});

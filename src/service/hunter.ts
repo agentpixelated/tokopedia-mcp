@@ -105,6 +105,17 @@ export async function huntProducts(gateway: TokopediaGateway, input: HuntProduct
     const { snapshot, analysis } = result.value;
     for (const question of analysis.verificationQuestions) verificationQuestions.add(question);
     const specBase = `${snapshot.listing.title} ${snapshot.description} ${snapshot.specs.map((spec) => `${spec.label} ${spec.value}`).join(' ')}`;
+    if (snapshot.skus.length === 0 && snapshot.variantTruth?.state !== 'none') {
+      sourceWarnings.push({
+        code: 'variant_truth_unresolved',
+        source: 'tokopedia_product_page',
+        url: snapshot.listing.url,
+        state: snapshot.variantTruth?.state ?? 'unknown',
+        declared: snapshot.variantTruth?.declared ?? null,
+        detail: 'Parent listing was not promoted because concrete SKU evidence is unresolved.',
+      });
+      return;
+    }
     const sourceSkus = snapshot.skus.length > 0
       ? snapshot.skus
       : [{
