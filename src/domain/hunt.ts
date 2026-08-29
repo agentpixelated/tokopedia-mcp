@@ -12,6 +12,8 @@ export interface HuntCandidate {
   ramGb?: number | null;
   specText: string;
   issueSeverities: Array<'low' | 'medium' | 'high'>;
+  classification?: 'target' | 'accessory' | 'uncertain';
+  classificationReasons?: string[];
 }
 
 export interface HuntCriteria {
@@ -36,7 +38,8 @@ function containsTerm(haystack: string, term: string): boolean {
 
 function detectRamGb(candidate: HuntCandidate): number | null {
   if (candidate.ramGb !== undefined) return candidate.ramGb;
-  const matches = [...text(candidate).matchAll(/\b(4|8|12|16|24|32|64)\s*gb\b/g)].map((match) => Number(match[1]));
+  const matches = [...text(candidate).matchAll(/(?:ram|memory|memori)[^\d]{0,12}(4|8|12|16|24|32|64)\s*gb\b/g)]
+    .map((match) => Number(match[1]));
   return matches.length ? Math.max(...matches) : null;
 }
 
@@ -94,8 +97,10 @@ export function buildShortlist(candidates: HuntCandidate[], criteria: HuntCriter
     const rejectionReasons: string[] = [];
     if (criteria.priceMin !== undefined && candidate.price < criteria.priceMin) rejectionReasons.push('below_price_floor');
     if (criteria.priceMax !== undefined && candidate.price > criteria.priceMax) rejectionReasons.push('above_price_ceiling');
+    if (candidate.classification === 'accessory') rejectionReasons.push('classified:accessory');
+    if (candidate.classification === 'uncertain') rejectionReasons.push('classified:uncertain');
     for (const word of criteria.mustInclude ?? []) {
-      if (!haystack.includes(word.toLowerCase())) rejectionReasons.push(`missing:${word}`);
+      if (!containsTerm(haystack, word)) rejectionReasons.push(`missing:${word}`);
     }
     for (const word of criteria.mustExclude ?? []) {
       if (containsTerm(haystack, word)) rejectionReasons.push(`excluded:${word}`);

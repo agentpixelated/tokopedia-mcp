@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseProductPage } from '../src/infra/product-page.js';
+import { loadProductPage, parseProductPage } from '../src/infra/product-page.js';
 
 test('parseProductPage handles cache JSON with braces inside strings', () => {
   const html = `
@@ -20,5 +20,29 @@ test('parseProductPage fails explicitly when no product evidence exists', () => 
   assert.throws(
     () => parseProductPage('https://www.tokopedia.com/search?q=x', '<html></html>'),
     /No Tokopedia product data/,
+  );
+});
+
+test('parseProductPage rejects title-only non-product pages', () => {
+  assert.throws(
+    () => parseProductPage(
+      'https://www.tokopedia.com/shop/not-a-product',
+      '<meta property="og:title" content="Tokopedia promotion | Tokopedia">',
+    ),
+    /No Tokopedia product data/,
+  );
+});
+
+test('loadProductPage rejects deceptive Tokopedia subdomains before fetching', async () => {
+  await assert.rejects(
+    loadProductPage('https://evil.tokopedia.com/shop/item'),
+    /www\.tokopedia\.com/,
+  );
+});
+
+test('loadProductPage rejects non-product paths before fetching', async () => {
+  await assert.rejects(
+    loadProductPage('https://www.tokopedia.com/search?q=thinkpad'),
+    /product detail path/,
   );
 });

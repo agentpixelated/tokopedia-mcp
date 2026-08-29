@@ -14,7 +14,8 @@ const candidates: HuntCandidate[] = [
     reviewCount: 20,
     shopTransactions: 1_009,
     stock: 20,
-    specText: 'i5-8265U 16GB 256GB touchscreen stylus',
+    ramGb: 16,
+    specText: 'i5-8265U RAM 16GB SSD 256GB touchscreen stylus',
     issueSeverities: [],
   },
   {
@@ -27,7 +28,8 @@ const candidates: HuntCandidate[] = [
     reviewCount: 0,
     shopTransactions: 3,
     stock: 1,
-    specText: 'i5-10210U 16GB 256GB touchscreen stylus; listing analysis found an 8GB description conflict',
+    ramGb: 16,
+    specText: 'i5-10210U RAM 16GB SSD 256GB touchscreen stylus; listing analysis found an 8GB description conflict',
     issueSeverities: ['high'],
   },
 ];
@@ -58,4 +60,18 @@ test('buildShortlist deduplicates concrete SKUs without collapsing different var
   });
 
   assert.deepEqual(result.ranked.map((item) => item.skuId).sort(), ['x390-16-256', 'x390-16-512']);
+});
+
+test('buildShortlist uses token boundaries for required terms and excludes classified accessories', () => {
+  const result = buildShortlist([
+    { ...candidates[0], skuId: 'program', title: 'Program license', specText: 'program utility' },
+    { ...candidates[0], skuId: 'charger', classification: 'accessory', classificationReasons: ['accessory_first_title'] },
+  ], {
+    mustInclude: ['ram'],
+    limit: 5,
+  });
+
+  assert.equal(result.ranked.length, 0);
+  assert.equal(result.rejected.find((item) => item.skuId === 'program')?.rejectionReasons.includes('missing:ram'), true);
+  assert.equal(result.rejected.find((item) => item.skuId === 'charger')?.rejectionReasons.includes('classified:accessory'), true);
 });

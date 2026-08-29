@@ -119,3 +119,126 @@ test('huntProducts bounds concurrent product-page inspections', async () => {
 
   assert.equal(peak, 2);
 });
+
+test('huntProducts searches multiple pages per query and exposes pagination diagnostics', async () => {
+  const pagesSeen: number[] = [];
+  let inspections = 0;
+  const pagedGateway: TokopediaGateway = {
+    ...gateway,
+    async search(input) {
+      pagesSeen.push(input.page ?? 1);
+      const base = await gateway.search(input);
+      const page = input.page ?? 1;
+      return {
+        ...base,
+        items: [{ ...base.items[0], productId: `parent-${page}`, url: `https://www.tokopedia.com/shop/x390-${page}` }],
+        page: { ...base.page, number: page, nextPage: page < 2 ? page + 1 : null },
+      };
+    },
+    async inspectProduct(url) {
+      inspections += 1;
+      return gateway.inspectProduct(url);
+    },
+  };
+
+  const result = await huntProducts(pagedGateway, {
+    queries: ['x390 yoga'],
+    listingsPerQuery: 5,
+    maxPagesPerQuery: 3,
+    maxListingsToInspect: 5,
+    criteria: { limit: 5 },
+  });
+
+  assert.deepEqual(pagesSeen, [1, 2]);
+  assert.equal(inspections, 2);
+  assert.deepEqual(result.searchPagination[0], {
+    query: 'x390 yoga',
+    pagesFetched: 2,
+    fetchedCount: 2,
+    returnedCount: 2,
+    dedupedCount: 0,
+    hasMore: false,
+    stopReason: 'source_exhausted',
+  });
+});
+
+test('huntProducts does not treat storage capacity as RAM', async () => {
+  const storageGateway: TokopediaGateway = {
+    ...gateway,
+    async inspectProduct(url) {
+      const result = await gateway.inspectProduct(url);
+      return {
+        ...result,
+        snapshot: {
+          ...result.snapshot,
+          listing: { ...result.snapshot.listing, title: 'ThinkPad X390 Yoga' },
+          description: 'Convertible laptop',
+          skus: [{
+            ...result.snapshot.skus[0],
+            title: 'ThinkPad X390 Yoga',
+            options: [{ axis: 'Storage', value: '32GB eMMC' }],
+          }],
+        },
+      };
+    },
+  };
+
+  const result = await huntProducts(storageGateway, {
+    queries: ['thinkpad x390 yoga'],
+    criteria: { minRamGb: 16, limit: 5 },
+  });
+
+  assert.equal(result.shortlist.ranked.length, 0);
+  assert.equal(result.shortlist.rejected[0].rejectionReasons.includes('ram_below:16gb'), true);
+});
+
+test('huntProducts keeps successful queries when another discovery source fails', async () => {
+  const partialGateway: TokopediaGateway = {
+    ...gateway,
+    async search(input) {
+      if (input.query === 'blocked query') throw new Error('upstream unavailable');
+      return gateway.search(input);
+    },
+  };
+
+  const result = await huntProducts(partialGateway, {
+    queries: ['thinkpad x390', 'blocked query'],
+    criteria: { limit: 5 },
+  });
+
+  assert.equal(result.inspectedListings, 1);
+  assert.deepEqual(result.sourceWarnings, [{
+    code: 'search_source_failed',
+    source: 'tokopedia_graphql',
+    query: 'blocked query',
+    error: 'upstream unavailable',
+  }]);
+});
+
+test('huntProducts preserves non-fatal GraphQL warnings from successful pages', async () => {
+  const warningGateway: TokopediaGateway = {
+    ...gateway,
+    async search(input) {
+      const result = await gateway.search(input);
+      return {
+        ...result,
+        warnings: [{
+          code: 'graphql_partial_error',
+          source: 'tokopedia_graphql',
+          operation: 'SearchProductV5Query',
+          message: 'optional field unavailable',
+          path: ['searchProductV5', 'data'],
+        }],
+      };
+    },
+  };
+
+  const result = await huntProducts(warningGateway, {
+    queries: ['thinkpad x390'],
+    criteria: { limit: 5 },
+  });
+
+  assert.equal(result.sourceWarnings[0].code, 'graphql_partial_error');
+  assert.equal(result.sourceWarnings[0].query, 'thinkpad x390');
+  assert.equal(result.sourceWarnings[0].page, 1);
+});

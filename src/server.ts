@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { analyzeListing, type ProductSnapshot } from './domain/product.js';
 import { buildShortlist, type HuntCandidate } from './domain/hunt.js';
+import { applyOutputBudget } from './presentation/budget.js';
 import { LiveTokopediaGateway, type TokopediaGateway } from './service/gateway.js';
 import { huntProducts } from './service/hunter.js';
 
@@ -33,6 +34,19 @@ const SearchOutput = z.object({
   items: z.array(z.record(z.string(), z.unknown())),
   page: z.record(z.string(), z.unknown()),
   provenance: z.record(z.string(), z.unknown()),
+  warnings: z.array(z.record(z.string(), z.unknown())).optional(),
+});
+
+const BudgetOutput = z.object({
+  items: z.array(z.record(z.string(), z.unknown())),
+  provenance: z.unknown().optional(),
+  truncation: z.object({
+    truncated: z.boolean(),
+    maxChars: z.number().int(),
+    maxItems: z.number().int(),
+    omittedItems: z.number().int(),
+    omittedFields: z.array(z.string()),
+  }),
 });
 
 const InspectionOutput = z.object({
@@ -63,6 +77,8 @@ const HuntOutput = z.object({
   failures: z.array(z.record(z.string(), z.unknown())),
   verificationQuestions: z.array(z.string()),
   provenance: z.array(z.record(z.string(), z.unknown())),
+  searchPagination: z.array(z.record(z.string(), z.unknown())),
+  sourceWarnings: z.array(z.record(z.string(), z.unknown())),
 });
 
 const SnapshotSchema = z.object({
@@ -70,6 +86,8 @@ const SnapshotSchema = z.object({
   description: z.string(),
   specs: z.array(z.record(z.string(), z.unknown())),
   skus: z.array(z.record(z.string(), z.unknown())),
+  variantTruth: z.record(z.string(), z.unknown()).optional(),
+  evidence: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   provenance: z.record(z.string(), z.unknown()),
 });
 
@@ -87,6 +105,8 @@ const CandidateSchema = z.object({
   ramGb: z.number().int().positive().nullable().optional(),
   specText: z.string(),
   issueSeverities: z.array(z.enum(['low', 'medium', 'high'])),
+  classification: z.enum(['target', 'accessory', 'uncertain']).optional(),
+  classificationReasons: z.array(z.string()).optional(),
 });
 
 export function createServer(gateway: TokopediaGateway = new LiveTokopediaGateway()): McpServer {
@@ -116,6 +136,30 @@ export function createServer(gateway: TokopediaGateway = new LiveTokopediaGatewa
           throw new Error('priceMin cannot be greater than priceMax.');
         }
         return text(await gateway.search(input));
+      } catch (caught) {
+        return error(caught);
+      }
+    },
+  );
+
+  server.registerTool(
+    'budget_results',
+    {
+      title: 'Apply a deterministic result budget',
+      description:
+        'Deterministically reduce an item envelope to explicit maxChars/maxItems limits while preserving item identities, provenance when it fits, and machine-readable truncation metadata.',
+      inputSchema: {
+        items: z.array(z.record(z.string(), z.unknown())).max(500),
+        provenance: z.unknown().optional(),
+        maxChars: z.number().int().min(512).max(200_000).default(20_000),
+        maxItems: z.number().int().min(1).max(500).default(50),
+      },
+      outputSchema: BudgetOutput,
+      annotations,
+    },
+    async ({ items, provenance, maxChars, maxItems }) => {
+      try {
+        return text(applyOutputBudget({ items, provenance }, { maxChars, maxItems }));
       } catch (caught) {
         return error(caught);
       }
@@ -201,6 +245,7 @@ export function createServer(gateway: TokopediaGateway = new LiveTokopediaGatewa
       inputSchema: {
         queries: z.array(z.string().min(1)).min(1).max(10),
         listingsPerQuery: z.number().int().min(1).max(30).default(10),
+        maxPagesPerQuery: z.number().int().min(1).max(10).default(1),
         maxListingsToInspect: z.number().int().min(1).max(50).default(20),
         inspectionConcurrency: z.number().int().min(1).max(8).default(4),
         criteria: z.object({

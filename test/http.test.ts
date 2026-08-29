@@ -33,3 +33,13 @@ test('fetchWithPolicy never retries a permanent 404', async () => {
   );
   assert.equal(calls, 1);
 });
+
+test('fetchWithPolicy rejects redirects when redirect mode is manual', async () => {
+  await assert.rejects(
+    fetchWithPolicy('https://www.tokopedia.com/shop/item', { redirect: 'manual' }, {
+      fetchImpl: async () => new Response('', { status: 302, headers: { location: 'https://127.0.0.1/private' } }),
+      retries: 0,
+    }),
+    /HTTP 302/,
+  );
+});

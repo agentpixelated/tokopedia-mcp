@@ -5,10 +5,10 @@ import {
   type RawSearchResponse,
   type SearchInput,
 } from '../domain/search.js';
-import { searchGraphql } from '../infra/graphql.js';
+import { searchGraphql, type GraphqlWarning } from '../infra/graphql.js';
 import { loadProductPage } from '../infra/product-page.js';
 
-export type SearchResult = ReturnType<typeof normalizeSearchResult>;
+export type SearchResult = ReturnType<typeof normalizeSearchResult> & { warnings?: GraphqlWarning[] };
 
 export interface ProductInspection {
   snapshot: ProductSnapshot;
@@ -22,8 +22,9 @@ export interface TokopediaGateway {
 
 export class LiveTokopediaGateway implements TokopediaGateway {
   async search(input: SearchInput): Promise<SearchResult> {
-    const raw = await searchGraphql<RawSearchResponse>(buildSearchParams(input));
-    return normalizeSearchResult(raw, input);
+    const response = await searchGraphql<RawSearchResponse['data']>(buildSearchParams(input));
+    const result = normalizeSearchResult({ data: response.data }, input);
+    return { ...result, warnings: response.warnings };
   }
 
   async inspectProduct(url: string): Promise<ProductInspection> {

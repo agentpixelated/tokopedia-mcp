@@ -1,9 +1,12 @@
 import { buildShortlist, type HuntCandidate, type HuntCriteria } from '../domain/hunt.js';
+import { classifyCandidate } from '../domain/classification.js';
+import { collectPages } from '../domain/pagination.js';
 import type { TokopediaGateway } from './gateway.js';
 
 export interface HuntProductsInput {
   queries: string[];
   listingsPerQuery?: number;
+  maxPagesPerQuery?: number;
   maxListingsToInspect?: number;
   inspectionConcurrency?: number;
   criteria: HuntCriteria;
@@ -18,11 +21,13 @@ function numericSold(text: string): number {
 }
 
 function skuRamGb(title: string, options: Array<{ axis: string; value: string }>): number | null {
-  const optionText = options.map((option) => `${option.axis} ${option.value}`).join(' ');
-  const explicit = optionText.match(/(?:ram|memory)[^\d]{0,12}(4|8|12|16|24|32|64)\s*gb/i);
-  const generic = optionText.match(/\b(4|8|12|16|24|32|64)\s*gb\b/i);
-  const titleMatch = title.match(/(?:ram|memory)[^\d]{0,12}(4|8|12|16|24|32|64)\s*gb/i);
-  return Number(explicit?.[1] ?? generic?.[1] ?? titleMatch?.[1]) || null;
+  for (const option of options) {
+    if (!/\b(ram|memory|memori)\b/i.test(option.axis)) continue;
+    const value = option.value.match(/\b(4|8|12|16|24|32|64)\s*gb\b/i)?.[1];
+    if (value) return Number(value);
+  }
+  const titleMatch = title.match(/(?:ram|memory|memori)[^\d]{0,12}(4|8|12|16|24|32|64)\s*gb/i);
+  return titleMatch ? Number(titleMatch[1]) : null;
 }
 
 async function inspectBounded(
@@ -48,21 +53,40 @@ async function inspectBounded(
 }
 
 export async function huntProducts(gateway: TokopediaGateway, input: HuntProductsInput) {
-  const discoveries = await Promise.all(
-    input.queries.map((query) =>
-      gateway.search({
-        query,
-        page: 1,
-        limit: input.listingsPerQuery ?? 10,
-        priceMin: input.criteria.priceMin,
-        priceMax: input.criteria.priceMax,
-        sort: 'relevance',
-      }),
-    ),
+  const discoverySettled = await Promise.allSettled(
+    input.queries.map(async (query) => {
+      const provenances: Array<Awaited<ReturnType<TokopediaGateway['search']>>['provenance']> = [];
+      const warnings: Array<Record<string, unknown>> = [];
+      const collected = await collectPages(async (page) => {
+        const result = await gateway.search({
+          query,
+          page,
+          limit: input.listingsPerQuery ?? 10,
+          priceMin: input.criteria.priceMin,
+          priceMax: input.criteria.priceMax,
+          sort: 'relevance',
+        });
+        provenances.push(result.provenance);
+        for (const warning of result.warnings ?? []) warnings.push({ ...warning, query, page });
+        return { items: result.items, hasMore: result.page.nextPage !== null };
+      }, { maxPages: input.maxPagesPerQuery ?? 1 });
+      return { query, ...collected, provenances, warnings };
+    }),
   );
+  const discoveryGroups = discoverySettled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+  const sourceWarnings: Array<Record<string, unknown>> = discoveryGroups.flatMap((result) => result.warnings);
+  sourceWarnings.push(...discoverySettled.flatMap((result, index) => result.status === 'rejected' ? [{
+    code: 'search_source_failed' as const,
+    source: 'tokopedia_graphql' as const,
+    query: input.queries[index],
+    error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+  }] : []));
+  if (discoveryGroups.length === 0) {
+    throw new Error(`All search queries failed: ${sourceWarnings.map((warning) => `${warning.query}: ${warning.error}`).join('; ')}`);
+  }
 
-  const unique = new Map<string, (typeof discoveries)[number]['items'][number]>();
-  for (const discovery of discoveries) {
+  const unique = new Map<string, (typeof discoveryGroups)[number]['items'][number]>();
+  for (const discovery of discoveryGroups) {
     for (const listing of discovery.items) unique.set(listing.productId || listing.url, listing);
   }
   const leads = [...unique.values()].slice(0, input.maxListingsToInspect ?? 20);
@@ -95,10 +119,16 @@ export async function huntProducts(gateway: TokopediaGateway, input: HuntProduct
         }];
     for (const sku of sourceSkus) {
       if (!sku.buyable) continue;
+      const candidateTitle = `${snapshot.listing.title} ${sku.title} ${sku.options.map((option) => `${option.axis} ${option.value}`).join(' ')}`.trim();
+      const classification = classifyCandidate({
+        title: candidateTitle,
+        description: snapshot.description,
+        query: input.queries[0],
+      });
       candidates.push({
         productId: snapshot.listing.productId,
         skuId: sku.productId,
-        title: `${sku.title || snapshot.listing.title} ${sku.options.map((option) => `${option.axis} ${option.value}`).join(' ')}`.trim(),
+        title: candidateTitle,
         url: sku.url || snapshot.listing.url,
         price: sku.price.value,
         rating: snapshot.listing.rating ?? lead.rating ?? 0,
@@ -109,6 +139,8 @@ export async function huntProducts(gateway: TokopediaGateway, input: HuntProduct
         ramGb: skuRamGb(sku.title, sku.options),
         specText: `${specBase} ${sku.options.map((option) => `${option.axis} ${option.value}`).join(' ')}`,
         issueSeverities: analysis.issues.map((issue) => issue.severity),
+        classification: classification.classification,
+        classificationReasons: classification.reasons,
       });
     }
   });
@@ -122,6 +154,8 @@ export async function huntProducts(gateway: TokopediaGateway, input: HuntProduct
     shortlist: buildShortlist(candidates, input.criteria),
     failures,
     verificationQuestions: [...verificationQuestions],
-    provenance: discoveries.map((result) => result.provenance),
+    provenance: discoveryGroups.flatMap((result) => result.provenances),
+    searchPagination: discoveryGroups.map((result) => ({ query: result.query, ...result.pagination })),
+    sourceWarnings,
   };
 }

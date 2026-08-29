@@ -35,13 +35,26 @@ test('MCP exposes focused evidence-first tools and structured output', async () 
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    ['analyze_listing', 'build_shortlist', 'hunt_products', 'inspect_product', 'search_products'],
+    ['analyze_listing', 'budget_results', 'build_shortlist', 'hunt_products', 'inspect_product', 'search_products'],
   );
 
   const result = await client.callTool({ name: 'search_products', arguments: { query: 'thinkpad yoga' } });
   assert.deepEqual((result.structuredContent as { query: string }).query, 'thinkpad yoga');
   assert.equal(result.isError, undefined);
   assert.equal(result.content[0].type, 'text');
+
+  const budgeted = await client.callTool({
+    name: 'budget_results',
+    arguments: {
+      items: Array.from({ length: 5 }, (_, index) => ({ productId: String(index), title: `Product ${index}` })),
+      provenance: { source: 'fixture' },
+      maxChars: 512,
+      maxItems: 2,
+    },
+  });
+  const budgetContent = budgeted.structuredContent as { items: unknown[]; truncation: { omittedItems: number } };
+  assert.equal(budgetContent.items.length, 2);
+  assert.equal(budgetContent.truncation.omittedItems, 3);
 
   await Promise.all([client.close(), server.close()]);
 });

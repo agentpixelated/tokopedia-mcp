@@ -58,7 +58,45 @@ const SEARCH_QUERY = `query SearchProductV5Query($params: String!) {
   }
 }`;
 
-export async function graphqlRequest<T>(operation: string, query: string, variables: Record<string, unknown>): Promise<T> {
+export interface GraphqlWarning {
+  code: 'graphql_partial_error';
+  source: 'tokopedia_graphql';
+  operation: string;
+  message: string;
+  path: Array<string | number>;
+}
+
+interface GraphqlBody<T> {
+  data?: T;
+  errors?: Array<{ message: string; path?: Array<string | number> }>;
+}
+
+export function parseGraphqlBody<T>(
+  operation: string,
+  body: GraphqlBody<T>,
+): { data: T; warnings: GraphqlWarning[] } {
+  const errors = body.errors ?? [];
+  if (body.data === undefined) {
+    const detail = errors.length > 0 ? errors.map((error) => error.message).join('; ') : 'response contained no data';
+    throw new Error(`${operation}: ${detail}`);
+  }
+  return {
+    data: body.data,
+    warnings: errors.map((error) => ({
+      code: 'graphql_partial_error',
+      source: 'tokopedia_graphql',
+      operation,
+      message: error.message,
+      path: error.path ?? [],
+    })),
+  };
+}
+
+export async function graphqlRequest<T>(
+  operation: string,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<{ data: T; warnings: GraphqlWarning[] }> {
   const response = await fetchWithPolicy(`${ENDPOINT}/${operation}`, {
     method: 'POST',
     headers: {
@@ -70,11 +108,9 @@ export async function graphqlRequest<T>(operation: string, query: string, variab
     },
     body: JSON.stringify({ operationName: operation, query, variables }),
   });
-  const body = (await response.json()) as T & { errors?: Array<{ message: string }> };
-  if (body.errors?.length) throw new Error(`${operation}: ${body.errors.map((error) => error.message).join('; ')}`);
-  return body;
+  return parseGraphqlBody<T>(operation, await response.json() as GraphqlBody<T>);
 }
 
-export function searchGraphql<T>(params: string): Promise<T> {
+export function searchGraphql<T>(params: string): Promise<{ data: T; warnings: GraphqlWarning[] }> {
   return graphqlRequest<T>('SearchProductV5Query', SEARCH_QUERY, { params });
 }

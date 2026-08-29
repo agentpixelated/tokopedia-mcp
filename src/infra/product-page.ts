@@ -59,7 +59,14 @@ export function parseProductPage(url: string, html: string, fetchedAt = new Date
   const title = meta(html, 'og:title').replace(/\s*\|\s*Tokopedia\s*$/i, '');
   const rawPrice = meta(html, 'product:price:amount');
   const cache = parseApolloCache(html) ?? {};
-  if (!title && !Object.keys(cache).some((key) => /^pdpBasicInfo\d+$/.test(key))) {
+  const productCache = Object.entries(cache).find(([key, value]) =>
+    /^pdpBasicInfo\d+$/.test(key)
+      && value !== null
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && typeof (value as Record<string, unknown>).productID !== 'undefined',
+  );
+  if (!productCache) {
     throw new Error(`No Tokopedia product data found at ${url}`);
   }
   return {
@@ -77,11 +84,19 @@ export function parseProductPage(url: string, html: string, fetchedAt = new Date
 
 export async function loadProductPage(url: string): Promise<ProductPageDocument> {
   const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' || !/(^|\.)tokopedia\.com$/i.test(parsed.hostname)) {
-    throw new Error('Product URL must use HTTPS on tokopedia.com.');
+  const allowedHosts = new Set(['www.tokopedia.com', 'tokopedia.com']);
+  if (parsed.protocol !== 'https:' || !allowedHosts.has(parsed.hostname.toLowerCase())) {
+    throw new Error('Product URL must use HTTPS on www.tokopedia.com.');
+  }
+  const segments = parsed.pathname.split('/').filter(Boolean);
+  if (segments.length !== 2 || ['search', 'discovery', 'help', 'p', 'promo'].includes(segments[0].toLowerCase())) {
+    throw new Error('Product URL must use a canonical Tokopedia product detail path /shop/product.');
   }
   parsed.search = '';
   parsed.hash = '';
-  const response = await fetchWithPolicy(parsed.toString(), { headers: { Accept: 'text/html' } });
+  const response = await fetchWithPolicy(parsed.toString(), {
+    headers: { Accept: 'text/html' },
+    redirect: 'manual',
+  });
   return parseProductPage(parsed.toString(), await response.text());
 }

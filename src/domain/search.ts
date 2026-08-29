@@ -16,7 +16,7 @@ export interface RawSearchProduct {
   url: string;
   price: {
     text: string;
-    number: number;
+    number: number | string | null;
     original?: string;
     discountPercentage?: number;
   };
@@ -92,11 +92,22 @@ function tierName(tier: number): 'official' | 'power' | 'regular' | 'unknown' {
   return 'unknown';
 }
 
+function finiteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function finiteCount(value: unknown): number {
+  const number = finiteNumber(value);
+  return number === null || number < 0 ? 0 : Math.trunc(number);
+}
+
 export function normalizeSearchResult(raw: RawSearchResponse, input: SearchInput, now = new Date()) {
   const page = input.page ?? 1;
   const limit = input.limit ?? 24;
   const result = raw.data.searchProductV5;
-  const total = result.header.totalData;
+  const total = finiteCount(result.header.totalData);
   return {
     query:
       result.header.keywordProcess && result.header.keywordProcess !== '0'
@@ -108,12 +119,18 @@ export function normalizeSearchResult(raw: RawSearchResponse, input: SearchInput
       url: canonicalUrl(product.url),
       price: {
         currency: 'IDR' as const,
-        value: product.price.number,
+        value: finiteNumber(product.price.number),
         formatted: product.price.text,
         originalFormatted: product.price.original || null,
-        discountPercentage: product.price.discountPercentage ?? 0,
+        discountPercentage: finiteNumber(product.price.discountPercentage) ?? 0,
       },
-      rating: product.rating === undefined || product.rating === '' ? null : Number(product.rating),
+      rating: finiteNumber(product.rating),
+      evidence: {
+        title: { source: 'tokopedia_graphql' as const, path: `searchProductV5.data.products[${product.id}].name` },
+        price: { source: 'tokopedia_graphql' as const, path: `searchProductV5.data.products[${product.id}].price.number` },
+        rating: { source: 'tokopedia_graphql' as const, path: `searchProductV5.data.products[${product.id}].rating` },
+        shop: { source: 'tokopedia_graphql' as const, path: `searchProductV5.data.products[${product.id}].shop` },
+      },
       shop: {
         shopId: product.shop.id,
         name: product.shop.name,

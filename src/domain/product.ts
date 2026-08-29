@@ -27,6 +27,26 @@ export interface ProductSku {
   cod: boolean;
 }
 
+export interface VariantDiagnostic {
+  code:
+    | 'reference_cycle'
+    | 'missing_reference'
+    | 'option_tuple_mismatch'
+    | 'duplicate_sku_id'
+    | 'missing_sku_id'
+    | 'missing_price';
+  path: string;
+  detail: string;
+}
+
+export interface VariantTruth {
+  state: 'confirmed' | 'partial' | 'unknown' | 'none';
+  declared: boolean | null;
+  axesFound: number;
+  skusFound: number;
+  diagnostics: VariantDiagnostic[];
+}
+
 export interface ProductSnapshot {
   listing: {
     productId: string;
@@ -44,6 +64,11 @@ export interface ProductSnapshot {
   description: string;
   specs: Array<{ label: string; value: string }>;
   skus: ProductSku[];
+  variantTruth: VariantTruth;
+  evidence: Record<string, {
+    source: 'page_meta' | 'apollo_cache';
+    path: string;
+  }>;
   provenance: {
     source: 'tokopedia_product_page';
     retrievedAt: string;
@@ -64,15 +89,44 @@ function asObject(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function resolveRef(value: unknown, cache: Record<string, unknown>): unknown {
-  const object = asObject(value);
-  if (object?.type === 'id' && typeof object.id === 'string') return cache[object.id] ?? value;
-  return value;
+function resolveRef(
+  value: unknown,
+  cache: Record<string, unknown>,
+  diagnostics?: VariantDiagnostic[],
+  path = '',
+): unknown {
+  let current = value;
+  const seen = new Set<string>();
+  while (true) {
+    const object = asObject(current);
+    if (object?.type !== 'id' || typeof object.id !== 'string') return current;
+    if (seen.has(object.id)) {
+      diagnostics?.push({ code: 'reference_cycle', path, detail: `Apollo reference cycle at ${object.id}.` });
+      return null;
+    }
+    seen.add(object.id);
+    if (!(object.id in cache)) {
+      diagnostics?.push({ code: 'missing_reference', path, detail: `Apollo reference ${object.id} is missing.` });
+      return null;
+    }
+    current = cache[object.id];
+  }
 }
 
 function resolveStringArray(value: unknown): string[] {
   const object = asObject(value);
   return object?.type === 'json' && Array.isArray(object.json) ? object.json.map(String) : [];
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function nonNegativeInteger(value: unknown): number {
+  const number = finiteNumber(value);
+  return number === null || number < 0 ? 0 : Math.trunc(number);
 }
 
 function formatIdr(value: number): string {
@@ -86,25 +140,39 @@ function findBasic(cache: Record<string, unknown>): { key: string; value: Record
 }
 
 function findPrefix(cache: Record<string, unknown>): string | null {
-  const key = Object.keys(cache).find((candidate) => candidate.includes('pdpMainInfo') && candidate.includes('.components.'));
-  return key ? key.slice(0, key.indexOf('.components.')) : null;
+  const counts = new Map<string, number>();
+  for (const key of Object.keys(cache)) {
+    const boundary = key.indexOf('.components.');
+    if (!key.includes('pdpMainInfo') || boundary < 0) continue;
+    const prefix = key.slice(0, boundary);
+    counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
 }
 
-function findParentId(cache: Record<string, unknown>, prefix: string | null): string {
-  if (!prefix) return '';
-  for (let component = 0; component < 40; component++) {
-    const variant = asObject(cache[`${prefix}.components.${component}.data.0.variant`]);
-    if (variant?.parentID !== undefined) return String(variant.parentID);
+function entriesFor(cache: Record<string, unknown>, prefix: string | null, suffix: RegExp): Array<[string, unknown]> {
+  if (!prefix) return [];
+  return Object.entries(cache)
+    .filter(([key]) => key.startsWith(`${prefix}.components.`) && suffix.test(key))
+    .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+function findVariantDeclaration(cache: Record<string, unknown>, prefix: string | null) {
+  for (const [path, raw] of entriesFor(cache, prefix, /\.data\.0\.variant$/)) {
+    const variant = asObject(raw);
+    if (!variant) continue;
+    return {
+      declared: typeof variant.isVariant === 'boolean' ? variant.isVariant : null,
+      parentId: variant.parentID === undefined ? '' : String(variant.parentID),
+      path,
+    };
   }
-  return '';
+  return { declared: null, parentId: '', path: '' };
 }
 
 function findDescription(cache: Record<string, unknown>, prefix: string | null): string {
-  if (!prefix) return '';
-  for (let component = 0; component < 40; component++) {
-    const description = asObject(
-      cache[`${prefix}.components.${component}.data.0.productDetailDescription`],
-    );
+  for (const [, raw] of entriesFor(cache, prefix, /\.data\.0\.productDetailDescription$/)) {
+    const description = asObject(raw);
     if (typeof description?.content === 'string') return description.content;
   }
   return '';
@@ -112,91 +180,124 @@ function findDescription(cache: Record<string, unknown>, prefix: string | null):
 
 function findSpecs(cache: Record<string, unknown>, prefix: string | null) {
   const specs: Array<{ label: string; value: string }> = [];
-  if (!prefix) return specs;
-  for (let component = 0; component < 40; component++) {
-    for (let row = 0; row < 100; row++) {
-      const value = asObject(cache[`${prefix}.components.${component}.data.0.content.${row}`]);
-      if (!value) continue;
-      if (typeof value.title === 'string' && typeof value.subtitle === 'string' && value.subtitle) {
-        specs.push({ label: value.title, value: value.subtitle });
-      }
+  for (const [, raw] of entriesFor(cache, prefix, /\.data\.0\.content\.\d+$/)) {
+    const value = asObject(raw);
+    if (typeof value?.title === 'string' && typeof value.subtitle === 'string' && value.subtitle) {
+      specs.push({ label: value.title, value: value.subtitle });
     }
   }
   return specs;
 }
 
-function findAxes(cache: Record<string, unknown>, prefix: string | null) {
+function findAxes(cache: Record<string, unknown>, prefix: string | null, diagnostics: VariantDiagnostic[]) {
   const axes: Array<{ name: string; optionMap: Map<string, string> }> = [];
-  if (!prefix) return axes;
-  for (let component = 0; component < 40; component++) {
-    for (let axisIndex = 0; axisIndex < 10; axisIndex++) {
-      const axis = asObject(cache[`${prefix}.components.${component}.data.0.variants.${axisIndex}`]);
-      if (!axis) continue;
-      const optionMap = new Map<string, string>();
-      if (Array.isArray(axis.option)) {
-        for (const rawOption of axis.option) {
-          const option = asObject(resolveRef(rawOption, cache));
-          if (option) optionMap.set(String(option.productVariantOptionID ?? ''), String(option.value ?? ''));
-        }
+  for (const [path, raw] of entriesFor(cache, prefix, /\.data\.0\.variants\.\d+$/)) {
+    const axis = asObject(raw);
+    if (!axis) continue;
+    const optionMap = new Map<string, string>();
+    if (Array.isArray(axis.option)) {
+      for (let index = 0; index < axis.option.length; index++) {
+        const option = asObject(resolveRef(axis.option[index], cache, diagnostics, `${path}.option.${index}`));
+        if (option) optionMap.set(String(option.productVariantOptionID ?? ''), String(option.value ?? ''));
       }
-      axes.push({ name: String(axis.name ?? axis.identifier ?? `option_${axisIndex + 1}`), optionMap });
     }
-    if (axes.length > 0) break;
+    axes.push({ name: String(axis.name ?? axis.identifier ?? `option_${axes.length + 1}`), optionMap });
   }
   return axes;
 }
 
-function findSkus(cache: Record<string, unknown>, prefix: string | null, axes: ReturnType<typeof findAxes>): ProductSku[] {
+function findSkus(
+  cache: Record<string, unknown>,
+  prefix: string | null,
+  axes: Array<{ name: string; optionMap: Map<string, string> }>,
+  diagnostics: VariantDiagnostic[],
+): ProductSku[] {
   const skus: ProductSku[] = [];
-  if (!prefix) return skus;
-  for (let component = 0; component < 40; component++) {
-    for (let childIndex = 0; childIndex < 500; childIndex++) {
-      const child = asObject(cache[`${prefix}.components.${component}.data.0.children.${childIndex}`]);
-      if (!child) continue;
-      const optionIds = resolveStringArray(child.optionID);
-      const optionNames = resolveStringArray(child.optionName);
-      const stockObject = asObject(resolveRef(child.stock, cache));
-      const stockValue = stockObject && stockObject.stock !== undefined ? Number(stockObject.stock) : null;
-      const options = optionNames.map((value, index) => ({
-        axis: axes[index]?.name ?? `option_${index + 1}`,
-        value: value || axes[index]?.optionMap.get(optionIds[index]) || '',
-      }));
-      const price = Number(child.price ?? 0);
-      skus.push({
-        productId: String(child.productID ?? ''),
-        title: String(child.productName ?? ''),
-        url: String(child.productURL ?? ''),
-        price: {
-          currency: 'IDR',
-          value: price,
-          formatted: String(child.priceFmt ?? formatIdr(price)),
-        },
-        options,
-        stock: {
-          value: Number.isFinite(stockValue) ? stockValue : null,
-          status: !Number.isFinite(stockValue) ? 'unknown' : stockValue! > 0 ? 'in_stock' : 'out_of_stock',
-        },
-        buyable: stockObject?.isBuyable !== false && (stockValue === null || stockValue > 0),
-        cod: Boolean(child.isCOD),
+  const seen = new Set<string>();
+  for (const [path, raw] of entriesFor(cache, prefix, /\.data\.0\.children\.\d+$/)) {
+    const child = asObject(raw);
+    if (!child) continue;
+    const productId = String(child.productID ?? '');
+    if (!productId) {
+      diagnostics.push({ code: 'missing_sku_id', path, detail: 'Variant child has no productID.' });
+      continue;
+    }
+    if (seen.has(productId)) {
+      diagnostics.push({ code: 'duplicate_sku_id', path, detail: `Duplicate SKU ID ${productId}.` });
+      continue;
+    }
+    seen.add(productId);
+
+    const optionIds = resolveStringArray(child.optionID);
+    const optionNames = resolveStringArray(child.optionName);
+    const tupleLength = Math.max(optionIds.length, optionNames.length);
+    if ((optionIds.length > 0 && optionNames.length > 0 && optionIds.length !== optionNames.length)
+      || (axes.length > 0 && tupleLength !== axes.length)) {
+      diagnostics.push({
+        code: 'option_tuple_mismatch',
+        path,
+        detail: `Expected ${axes.length} option values; found ${optionIds.length} IDs and ${optionNames.length} names.`,
       });
     }
-    if (skus.length > 0) break;
+    const options = Array.from({ length: tupleLength }, (_, index) => ({
+      axis: axes[index]?.name ?? `option_${index + 1}`,
+      value: optionNames[index] || axes[index]?.optionMap.get(optionIds[index]) || '',
+    }));
+
+    const stockObject = asObject(resolveRef(child.stock, cache, diagnostics, `${path}.stock`));
+    const stockValue = finiteNumber(stockObject?.stock);
+    const price = finiteNumber(child.price) ?? 0;
+    if (price <= 0) diagnostics.push({ code: 'missing_price', path, detail: `SKU ${productId} has no positive numeric price.` });
+    skus.push({
+      productId,
+      title: String(child.productName ?? ''),
+      url: String(child.productURL ?? ''),
+      price: {
+        currency: 'IDR',
+        value: price,
+        formatted: String(child.priceFmt ?? formatIdr(price)),
+      },
+      options,
+      stock: {
+        value: stockValue,
+        status: stockValue === null ? 'unknown' : stockValue > 0 ? 'in_stock' : 'out_of_stock',
+      },
+      buyable: stockObject?.isBuyable !== false && (stockValue === null || stockValue > 0),
+      cod: Boolean(child.isCOD),
+    });
   }
   return skus;
+}
+
+function buildVariantTruth(
+  declaration: ReturnType<typeof findVariantDeclaration>,
+  axesFound: number,
+  skusFound: number,
+  diagnostics: VariantDiagnostic[],
+): VariantTruth {
+  let state: VariantTruth['state'];
+  if (diagnostics.length > 0 && skusFound > 0) state = 'partial';
+  else if (declaration.declared === true && skusFound === 0) state = 'unknown';
+  else if (skusFound > 0) state = 'confirmed';
+  else if (declaration.declared === false) state = 'none';
+  else state = 'unknown';
+  return { state, declared: declaration.declared, axesFound, skusFound, diagnostics };
 }
 
 export function extractProductSnapshot(document: ProductPageDocument): ProductSnapshot {
   const basic = findBasic(document.cache);
   const prefix = findPrefix(document.cache);
-  const axes = findAxes(document.cache, prefix);
-  const skus = findSkus(document.cache, prefix, axes);
-  const rawPrice = document.meta.price ?? skus[0]?.price.value ?? 0;
+  const diagnostics: VariantDiagnostic[] = [];
+  const declaration = findVariantDeclaration(document.cache, prefix);
+  const axes = findAxes(document.cache, prefix, diagnostics);
+  const skus = findSkus(document.cache, prefix, axes, diagnostics);
+  const rawPrice = finiteNumber(document.meta.price) ?? skus[0]?.price.value ?? 0;
   const stats = basic ? asObject(document.cache[`$${basic.key}.stats`]) : null;
   const txStats = basic ? asObject(document.cache[`$${basic.key}.txStats`]) : null;
   return {
     listing: {
       productId: String(basic?.value.productID ?? ''),
-      parentId: findParentId(document.cache, prefix),
+      parentId: declaration.parentId,
       title: document.meta.title,
       url: String(basic?.value.url ?? document.url),
       displayPrice: { currency: 'IDR', value: rawPrice, formatted: formatIdr(rawPrice) },
@@ -206,13 +307,23 @@ export function extractProductSnapshot(document: ProductPageDocument): ProductSn
         shopId: String(basic?.value.shopID ?? ''),
         name: String(basic?.value.shopName ?? ''),
       },
-      rating: stats?.rating === undefined ? null : Number(stats.rating),
-      reviewCount: Number(stats?.countReview ?? 0),
+      rating: finiteNumber(stats?.rating),
+      reviewCount: nonNegativeInteger(stats?.countReview),
       soldText: String(txStats?.itemSoldFmt ?? txStats?.countSold ?? '0'),
     },
     description: findDescription(document.cache, prefix) || document.meta.description,
     specs: findSpecs(document.cache, prefix),
     skus,
+    variantTruth: buildVariantTruth(declaration, axes.length, skus.length, diagnostics),
+    evidence: {
+      'listing.title': { source: 'page_meta', path: 'meta[property="og:title"]' },
+      'listing.displayPrice': { source: 'page_meta', path: 'meta[property="product:price:amount"]' },
+      'listing.identity': { source: 'apollo_cache', path: basic?.key ?? 'pdpBasicInfo*' },
+      description: { source: prefix ? 'apollo_cache' : 'page_meta', path: prefix ? `${prefix}.components.*.data.0.productDetailDescription` : 'meta[property="og:description"]' },
+      specs: { source: 'apollo_cache', path: `${prefix ?? 'pdpMainInfo*'}.components.*.data.0.content.*` },
+      skus: { source: 'apollo_cache', path: `${prefix ?? 'pdpMainInfo*'}.components.*.data.0.children.*` },
+      variantTruth: { source: 'apollo_cache', path: declaration.path || `${prefix ?? 'pdpMainInfo*'}.components.*.data.0.variant` },
+    },
     provenance: {
       source: 'tokopedia_product_page',
       retrievedAt: document.fetchedAt.toISOString(),
@@ -256,14 +367,14 @@ export function analyzeListing(snapshot: ProductSnapshot) {
     issues.push({
       code: 'storage_conflict',
       severity: 'high',
-      summary: `Storage differs between title and description.`,
+      summary: 'Storage differs between title and description.',
       evidence: [
         { source: 'title', value: snapshot.listing.title },
         { source: 'description', value: snapshot.description },
       ],
     });
   }
-  const prices = snapshot.skus.map((sku) => sku.price.value).filter((value) => value > 0);
+  const prices = snapshot.skus.map((sku) => sku.price.value).filter((value) => value > 0 && Number.isFinite(value));
   const min = prices.length ? Math.min(...prices) : snapshot.listing.displayPrice.value;
   const max = prices.length ? Math.max(...prices) : snapshot.listing.displayPrice.value;
   if (min !== max) {

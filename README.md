@@ -23,8 +23,9 @@ This implementation makes uncertainty explicit instead of silently choosing one 
 | `search_products` | Listing-level discovery with numeric prices, pagination, canonical URLs, filters, and live provenance |
 | `inspect_product` | One fetch that separates parent listing metadata from every concrete SKU and runs contradiction analysis |
 | `analyze_listing` | Deterministically re-analyze an inspection snapshot without another network request |
+| `budget_results` | Apply explicit character/item limits with preserved identities, provenance, and truncation metadata |
 | `build_shortlist` | Apply hard constraints, SKU-level deduplication, transparent scoring, risk penalties, and retained rejection reasons |
-| `hunt_products` | Bounded end-to-end discovery, listing deduplication, SKU expansion, constraint filtering, and ranking |
+| `hunt_products` | Bounded multi-page discovery, listing deduplication, SKU expansion, constraint filtering, and ranking |
 
 All tools are read-only and return both MCP `structuredContent` and a JSON text fallback.
 
@@ -36,6 +37,9 @@ All tools are read-only and return both MCP `structuredContent` and a JSON text 
 4. **Freshness is visible.** Live network responses include retrieval timestamps and source/operation metadata.
 5. **No physical-condition fiction.** Marketplace evidence cannot verify battery health, panel defects, hinges, stylus inclusion, or the shipped unit. The tool emits seller-verification questions for those boundaries.
 6. **Ranking is reproducible.** Hard constraints run before scoring; duplicate keys are `productId:skuId`; rejected candidates are retained with reasons.
+7. **Classification is conservative.** Accessory-first and parts/replacement listings are excluded with reasons; ambiguous listings remain visible as `uncertain` rather than being silently promoted.
+8. **Partial data stays explicit.** GraphQL partial errors and per-query failures are returned as warnings while usable independent results remain composable.
+9. **Output limits are auditable.** `budget_results` enforces deterministic `maxChars`/`maxItems` limits and reports every omission.
 
 ## Install and run
 
@@ -92,6 +96,7 @@ CI runs offline verification on Node 20, 22, and 24. Live drift checks run weekl
 
 - Seller statistics and reviews are not yet folded directly into `inspect_product`; `build_shortlist` accepts normalized evidence for them. `hunt_products` therefore reports seller transaction history as unknown rather than mislabeling product sales.
 - Attribute extraction is intentionally conservative. Conflicts are surfaced rather than guessed away.
+- Product-page fetches are restricted to canonical HTTPS Tokopedia product paths, disable redirects, and fail closed when embedded product evidence is absent.
 - This is an initial evidence-first core, not a one-for-one recreation of every legacy browsing tool.
 
 ## License

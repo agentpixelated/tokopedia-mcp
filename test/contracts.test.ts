@@ -81,3 +81,29 @@ test('normalizeSearchResult ignores Tokopedia keywordProcess sentinel zero', () 
   const result = normalizeSearchResult(raw, { query: 'thinkpad yoga' });
   assert.equal(result.query, 'thinkpad yoga');
 });
+
+test('normalizeSearchResult never emits non-finite numeric values', () => {
+  const raw: RawSearchResponse = {
+    data: {
+      searchProductV5: {
+        header: { totalData: 1, responseCode: 'SUCCESS', keywordProcess: 'x390' },
+        data: {
+          products: [{
+            id: '10', name: 'X390', url: 'https://www.tokopedia.com/shop/x390',
+            price: { text: 'invalid', number: 1 }, rating: '5',
+            shop: { id: '20', name: 'Shop', url: 'https://www.tokopedia.com/shop', city: 'Jakarta', tier: 1 },
+          }],
+        },
+      },
+    },
+  };
+  raw.data.searchProductV5.header.totalData = Number.NaN;
+  raw.data.searchProductV5.data.products![0].price.number = Number.NaN;
+  raw.data.searchProductV5.data.products![0].rating = 'not-a-number';
+
+  const result = normalizeSearchResult(raw, { query: 'x390' });
+
+  assert.equal(result.items[0].price.value, null);
+  assert.equal(result.items[0].rating, null);
+  assert.equal(result.page.total, 0);
+});
