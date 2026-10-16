@@ -1,0 +1,46 @@
+{
+  "name": "@agentpixelated/tokopedia-mcp",
+  "version": "0.1.0",
+  "description": "Evidence-first Tokopedia MCP for SKU-level product hunting, contradiction detection, and auditable shortlists.",
+  "author": "agentpixelated",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "tokopedia-mcp": "build/index.js"
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "start": "node build/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "test:live": "tsx test/live-smoke.ts",
+    "check": "npm run test && npm run typecheck && npm run build"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "tokopedia",
+    "marketplace",
+    "shopping-research",
+    "product-comparison"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
