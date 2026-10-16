@@ -1,0 +1,113 @@
+export interface PageableItem {
+  productId: string;
+  url: string;
+}
+
+export interface SourcePage<T extends PageableItem> {
+  items: T[];
+  hasMore: boolean;
+  exhaustionKnown?: boolean;
+}
+
+export interface CollectPagesOptions {
+  maxPages: number;
+}
+
+export interface PaginationSummary {
+  pagesFetched: number;
+  fetchedCount: number;
+  returnedCount: number;
+  dedupedCount: number;
+  hasMore: boolean;
+  stopReason: 'source_exhausted' | 'source_uncertain' | 'repeated_page' | 'max_pages' | 'page_failed';
+}
+
+export interface PageFailure {
+  page: number;
+  error: string;
+}
+
+export function canonicalProductUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.search = '';
+    url.hash = '';
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url.toString();
+  } catch {
+    return value.trim();
+  }
+}
+
+function identity(item: PageableItem): string {
+  return item.productId.trim() || canonicalProductUrl(item.url);
+}
+
+function fingerprint<T extends PageableItem>(items: T[]): string {
+  return items.map(identity).sort().join('\n');
+}
+
+export async function collectPages<T extends PageableItem>(
+  fetchPage: (page: number) => Promise<SourcePage<T>> | SourcePage<T>,
+  options: CollectPagesOptions,
+): Promise<{ items: T[]; pagination: PaginationSummary; failure?: PageFailure }> {
+  if (!Number.isInteger(options.maxPages) || options.maxPages < 1) {
+    throw new Error('maxPages must be a positive integer.');
+  }
+  const items = new Map<string, T>();
+  const pageFingerprints = new Set<string>();
+  let pagesFetched = 0;
+  let fetchedCount = 0;
+  let dedupedCount = 0;
+  let hasMore = true;
+  let stopReason: PaginationSummary['stopReason'] = 'max_pages';
+  let failure: PageFailure | undefined;
+
+  for (let page = 1; page <= options.maxPages; page++) {
+    let source: SourcePage<T>;
+    try {
+      source = await fetchPage(page);
+    } catch (caught) {
+      if (pagesFetched === 0) throw caught;
+      failure = {
+        page,
+        error: caught instanceof Error ? caught.message : String(caught),
+      };
+      stopReason = 'page_failed';
+      hasMore = true;
+      break;
+    }
+    pagesFetched += 1;
+    fetchedCount += source.items.length;
+    hasMore = source.hasMore;
+    const currentFingerprint = fingerprint(source.items);
+    if (pageFingerprints.has(currentFingerprint)) {
+      stopReason = 'repeated_page';
+      break;
+    }
+    pageFingerprints.add(currentFingerprint);
+    for (const item of source.items) {
+      const key = identity(item);
+      if (items.has(key)) dedupedCount += 1;
+      else items.set(key, item);
+    }
+    if (!source.hasMore) {
+      stopReason = source.exhaustionKnown === false ? 'source_uncertain' : 'source_exhausted';
+      break;
+    }
+  }
+
+  return {
+    items: [...items.values()],
+    pagination: {
+      pagesFetched,
+      fetchedCount,
+      returnedCount: items.size,
+      dedupedCount,
+      hasMore,
+      stopReason,
+    },
+    ...(failure ? { failure } : {}),
+  };
+}
